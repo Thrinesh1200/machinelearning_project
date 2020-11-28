@@ -1,0 +1,146 @@
+---
+title: "ML"
+author: "Thrinesh Duvvuru"
+date: "28/11/2020"
+output: html_document
+---
+  
+### Preparing the data and R packages  
+
+#### Load packages, set caching 
+
+```{r, message=FALSE}
+require(caret)
+require(corrplot)
+require(Rtsne)
+require(xgboost)
+require(stats)
+require(knitr)
+require(ggplot2)
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+#### Getting Data
+```{r}
+# URL of the training and testing data
+train.url ="https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test.url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+# file names
+train.name = "./data/pml-training.csv"
+test.name = "./data/pml-testing.csv"
+# if directory does not exist, create new
+if (!file.exists("./data")) {
+  dir.create("./data")
+}
+# if files does not exist, download the files
+if (!file.exists(train.name)) {
+  download.file(train.url, destfile=train.name, method="curl")
+}
+if (!file.exists(test.name)) {
+  download.file(test.url, destfile=test.name, method="curl")
+}
+# load the CSV files as data.frame 
+train = read.csv("./data/pml-training.csv")
+test = read.csv("./data/pml-testing.csv")
+dim(train)
+dim(test)
+names(train)
+```  
+
+
+#### Data cleaning
+
+First, extract target outcome (the activity quality) from training data, so now the training data contains only the predictors (the activity monitors).   
+```{r}
+# target outcome (label)
+outcome.org = train[, "classe"]
+outcome = outcome.org 
+levels(outcome)
+```
+Outcome has 5 levels in character format.   
+Convert the outcome to numeric, because XGBoost gradient booster only recognizes numeric data.   
+```{r}
+# convert character levels to numeric
+num.class = length(levels(outcome))
+levels(outcome) = 1:num.class
+head(outcome)
+```
+   
+The outcome is removed from training data.   
+```{r}
+# remove outcome from train
+train$classe = NULL
+```
+
+The assignment rubric asks to use data from accelerometers on the `belt`, `forearm`, `arm`, and `dumbell`, so the features are extracted based on these keywords.   
+  
+```{r}
+# filter columns on: belt, forearm, arm, dumbell
+filter = grepl("belt|arm|dumbell", names(train))
+train = train[, filter]
+test = test[, filter]
+```
+
+Instead of less-accurate imputation of missing data, remove all columns with NA values.   
+```{r}
+# remove columns with NA, use test data as referal for NA
+cols.without.na = colSums(is.na(test)) == 0
+train = train[, cols.without.na]
+test = test[, cols.without.na]
+```
+
+### Preprocessing  
+   
+```{r}
+# check for zero variance
+zero.var = nearZeroVar(train, saveMetrics=TRUE)
+zero.var
+```
+There is no features without variability (all has enough variance). So there is no feature to be removed further.  
+
+#### Plot of relationship between features and outcome  
+
+Plot the relationship between features and outcome. From the plot below, each features has relatively the same distribution among the 5 outcome levels (A, B, C, D, E).   
+```{r fig.width=12, fig.height=8, dpi=72}
+featurePlot(train, outcome.org, "strip")
+```
+
+#### Plot of correlation matrix  
+
+```{r fig.width=12, fig.height=12, dpi=72}
+corrplot.mixed(cor(train), lower="circle", upper="color", 
+               tl.pos="lt", diag="n", order="hclust", hclust.method="complete")
+```
+
+#### tSNE plot 
+
+
+```{r fig.width=12, fig.height=8, dpi=72}
+# t-Distributed Stochastic Neighbor Embedding
+tsne = Rtsne(as.matrix(train), check_duplicates=FALSE, pca=TRUE, 
+              perplexity=30, theta=0.5, dims=2)
+embedding = as.data.frame(tsne$Y)
+embedding$Class = outcome.org
+g = ggplot(embedding, aes(x=V1, y=V2, color=Class)) +
+  geom_point(size=1.25) +
+  guides(colour=guide_legend(override.aes=list(size=6))) +
+  xlab("") + ylab("") +
+  ggtitle("t-SNE 2D Embedding of 'Classe' Outcome") +
+  theme_light(base_size=20) +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank())
+print(g)
+```
+
+### Build machine learning model 
+
+```{r}
+# convert data to matrix
+train.matrix = as.matrix(train)
+mode(train.matrix) = "numeric"
+test.matrix = as.matrix(test)
+mode(test.matrix) = "numeric"
+# convert outcome from factor to numeric matrix 
+#   xgboost takes multi-labels in [0, numOfClass)
+y = as.matrix(as.integer(outcome)-1)
+```
